@@ -130,6 +130,7 @@ load_blacklist (void)
 	  if (list == NULL)
 	    {
 	      free (buf);
+	      fclose (fp);
 	      return;
 	    }
 	}
@@ -164,10 +165,11 @@ bindresvport_sa(sd, sa)
 	int endport = ENDPORT;
 	int i;
 
+	mutex_lock(&port_lock);
+
 	if (!blacklist_read)
 		load_blacklist();
 
-	mutex_lock(&port_lock);
 	nports = ENDPORT - startport + 1;
 
         if (sa == NULL) {
