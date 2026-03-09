@@ -59,11 +59,14 @@
 #include <rpc/rpc.h>
 
 #include "rpc_com.h"
+#include "debug.h"
 
 #include <getpeereid.h>
 
 
 extern rwlock_t svc_fd_lock;
+extern SVCXPRT **__svc_xports;
+extern int svc_open_fds();
 
 static SVCXPRT *makefd_xprt(int, u_int, u_int);
 static bool_t rendezvous_request(SVCXPRT *, struct rpc_msg *);
@@ -82,6 +85,7 @@ static void svc_vc_ops(SVCXPRT *);
 static bool_t svc_vc_control(SVCXPRT *xprt, const u_int rq, void *in);
 static bool_t svc_vc_rendezvous_control (SVCXPRT *xprt, const u_int rq,
 				   	     void *in);
+static int __svc_destroy_idle(int timeout);
 
 struct cf_rendezvous { /* kept in xprt->xp_p1 for rendezvouser */
 	u_int sendsize;
@@ -229,6 +233,12 @@ svc_fd_create(fd, sendsize, recvsize)
 
 	slen = sizeof (struct sockaddr_storage);
 	if (getsockname(fd, (struct sockaddr *)(void *)&ss, &slen) < 0) {
+		if (errno == ENOTSOCK) {
+			if (libtirpc_debug_level > 3) {
+				LIBTIRPC_DEBUG(4, ("svc_fd_create: ENOTSOCK, return directly"));
+			}
+			return ret;
+		}
 		warnx("svc_fd_create: could not retrieve local addr");
 		goto freedata;
 	}
@@ -313,13 +323,14 @@ done:
 	return (xprt);
 }
 
+
 /*ARGSUSED*/
 static bool_t
 rendezvous_request(xprt, msg)
 	SVCXPRT *xprt;
 	struct rpc_msg *msg;
 {
-	int sock, flags;
+	int sock, flags, nfds, cnt;
 	struct cf_rendezvous *r;
 	struct cf_conn *cd;
 	struct sockaddr_storage addr;
@@ -378,6 +389,16 @@ again:
 		cd->nonblock = FALSE;
 
 	gettimeofday(&cd->last_recv_time, NULL);
+
+	nfds = svc_open_fds();
+	if (nfds >= (_rpc_dtablesize() / 5) * 4) {
+		/* destroy idle connections */
+		cnt = __svc_destroy_idle(15);
+		if (cnt == 0) {
+			/* destroy least active */
+			__svc_destroy_idle(0);
+		}
+	}
 
 	return (FALSE); /* there is never an rpc msg to be processed */
 }
@@ -819,4 +840,50 @@ bool_t
 __svc_clean_idle(fd_set *fds, int timeout, bool_t cleanblock)
 {
 	return FALSE;
+}
+
+static int
+__svc_destroy_idle(int timeout)
+{
+	int i, ncleaned = 0;
+	SVCXPRT *xprt, *least_active;
+	struct timeval tv, tdiff, tmax;
+	struct cf_conn *cd;
+
+	gettimeofday(&tv, NULL);
+	tmax.tv_sec = tmax.tv_usec = 0;
+	least_active = NULL;
+	rwlock_wrlock(&svc_fd_lock);
+
+	for (i = 0; i <= svc_max_pollfd; i++) {
+		if (svc_pollfd[i].fd == -1)
+			continue;
+		xprt = __svc_xports[i];
+		if (xprt == NULL || xprt->xp_ops == NULL ||
+			xprt->xp_ops->xp_recv != svc_vc_recv)
+			continue;
+		cd = (struct cf_conn *)xprt->xp_p1;
+		if (!cd->nonblock)
+			continue;
+		if (timeout == 0) {
+			timersub(&tv, &cd->last_recv_time, &tdiff);
+			if (timercmp(&tdiff, &tmax, >)) {
+				tmax = tdiff;
+				least_active = xprt;
+			}
+			continue;
+		}
+		if (tv.tv_sec - cd->last_recv_time.tv_sec > timeout) {
+			__xprt_unregister_unlocked(xprt);
+			__svc_vc_dodestroy(xprt);
+			ncleaned++;
+		}
+	}
+	if (timeout == 0 && least_active != NULL) {
+		__xprt_unregister_unlocked(least_active);
+		__svc_vc_dodestroy(least_active);
+		ncleaned++;
+	}
+	rwlock_unlock(&svc_fd_lock);
+	return (ncleaned);
 }
