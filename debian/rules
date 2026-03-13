@@ -32,6 +32,6 @@ override_dh_auto_clean:
 
 execute_before_dh_installdeb:
 	sed -e"s/#DEB_HOST_MULTIARCH#/$(DEB_HOST_MULTIARCH)/" \
-		debian/libtirpc3t64.preinst.in > debian/libtirpc3t64.preinst
+		debian/libtirpc3.preinst.in > debian/libtirpc3.preinst
 	sed -e"s/#DEB_HOST_MULTIARCH#/$(DEB_HOST_MULTIARCH)/" \
-		debian/libtirpc3t64.postrm.in > debian/libtirpc3t64.postrm
+		debian/libtirpc3.postrm.in > debian/libtirpc3.postrm
